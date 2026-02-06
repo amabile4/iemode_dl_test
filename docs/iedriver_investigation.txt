@@ -1,0 +1,170 @@
+================================================================================
+Selenium + IEDriver による Edge IEモード制御 調査報告書
+================================================================================
+調査日: 2026-02-07
+環境:
+  - OS: Windows 11 24H2 (Build 10.0.26100.7306)
+  - Edge: 144.0.3719.104
+  - IEDriverServer: 4.14.0.0 (32-bit) ※公式最新版
+  - Selenium (Python): 4.40.0
+  - Python: 3.13.11 (64-bit)
+  - IE: 11.1882.26100.0 (COMインフラとして残存)
+
+================================================================================
+1. 結論
+================================================================================
+IEDriver 4.14.0 + Edge 144 + Windows 11 24H2 の組み合わせでは、
+IEDriverによるEdge IEモードのセッション確立ができない。
+
+根本原因:
+  IEDriverがActive Accessibilityを使用してEdge IEモードウィンドウ内の
+  IWebBrowser2 COMインターフェースを検出しようとするが、
+  Edge 144のIEモードウィンドウはIEDriverが期待するウィンドウ構造
+  (IEFrameクラス等) を持たないため、無限ループに陥りタイムアウトする。
+
+代替手段:
+  comtypes による InternetExplorer.Application COM直接操作 + pywinauto
+  (COM経由のIE起動は正常動作を確認済み)
+
+================================================================================
+2. 調査経緯
+================================================================================
+
+[Phase 1] 基本構成での試行
+--------------------------------------------------------------------------------
+構成:
+  options.attach_to_edge_chrome = True
+  options.edge_executable_path = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
+  options.ignore_protected_mode_settings = True
+  options.initial_browser_url = "http://localhost:5000"
+  driver = webdriver.Ie(service=service, options=options)
+
+結果:
+  webdriver.Ie() 呼び出しで120秒タイムアウト (ReadTimeoutError)
+  ブラウザは起動しページは表示されるが、セッション確立が完了しない
+
+IEDriverログ停止箇所:
+  BrowserFactory.cpp(507) Using Active Accessibility to find IWebBrowser2 interface
+  → ここで無限ループ
+
+[Phase 2] オプション変更による試行
+--------------------------------------------------------------------------------
+試行1: initial_browser_url = "about:blank" + page_load_strategy = "none"
+  → 同じ箇所で停止
+
+試行2: ensure_clean_session / require_window_focus / force_create_process_api 追加
+  → TabProcGrowth レジストリ未設定エラー
+    "The value of registry setting in HKEY_CURRENT_USER\Software\Microsoft\
+     Internet Explorer\Main\TabProcGrowth must be '0'."
+
+試行3: TabProcGrowth = 0 設定後、force_create_process_api = True
+  → Edge起動成功、キャッシュクリア完了、しかし同じ箇所で停止
+    BrowserFactory.cpp(507) Using Active Accessibility to find IWebBrowser2 interface
+
+試行4: 追加オプションをすべて外し、シンプル構成に戻す
+  → 同じ箇所で停止
+
+[Phase 3] 環境要因の調査
+--------------------------------------------------------------------------------
+仮説1: 既存のEdgeプロセスとの競合
+  → Edgeプロセスを完全にkill (0個) した状態でも同じ結果
+  → 既存プロセス競合が原因ではないことが確定
+
+仮説2: レジストリ設定不足
+  - FEATURE_BFCACHE (HKLM): 未設定 → 設定しても改善なし
+  - TabProcGrowth (HKCU): 未設定 → 設定しても改善なし
+  - 保護モード: ゾーン1のみ無効(3)、他は未設定 → 統一されているため問題なし
+
+仮説3: IEのCOMインフラが削除されている
+  → 以下すべて正常:
+    - iexplore.exe: 存在 (32-bit, 64-bit 共に)
+    - ieframe.dll: 存在 (System32, SysWOW64 共に)
+    - mshtml.dll: 存在 (System32, SysWOW64 共に)
+    - InternetExplorer.Application CLSID: 登録済み
+    - IWebBrowser2 COM生成テスト: 成功 (ReadyState=4, HWND取得可)
+
+[Phase 4] ウィンドウ構造の調査 (原因特定)
+--------------------------------------------------------------------------------
+テスト1: COM直接起動 (comtypes.client.CreateObject)
+  → Window Class: "IEFrame"
+  → アクセシビリティツリー: 正常 (アドレスバー、通知バー等すべて存在)
+  → IWebBrowser2の操作: 完全に正常
+
+テスト2: Edge --ie-mode-test フラグで起動 (IEDriverと同じ方法)
+  → Window Class: Chrome系クラス (IEFrameではない)
+  → IE関連のタイトル/クラスを持つウィンドウ: なし
+  → IEDriverが探している IEFrame / IWebBrowser2 アクセシビリティ構造: 不在
+
+結論:
+  Edge 144の --ie-mode-test で起動されたIEモードタブは、
+  IEDriverが期待する IEFrame ウィンドウクラスおよび
+  Active Accessibility経由の IWebBrowser2 インターフェースを公開しない。
+  IEDriver 4.14.0 はこの状態に対応できず、インターフェース検出で
+  無限ループする。
+
+================================================================================
+3. IEDriverログの詳細分析
+================================================================================
+
+正常に進む部分:
+  1. IEDriverServer起動 (ポート割り当て、バージョン表示)
+  2. GET /status → "Ready to create session"
+  3. POST /session → W3C capabilities検証通過
+  4. se:ieOptions 検証通過 (ie.edgechromium, ie.edgepath等)
+  5. Edge実行パス確認
+  6. Protected Mode設定確認 (Ignoring=1)
+  7. Edge Chromium起動コマンド実行
+  8. "Edge in IE Mode launched successfully with process ID xxxxx"
+  9. "Process with ID xxxxx is executing msedge.exe"
+
+停止する部分:
+  10. "Using Active Accessibility to find IWebBrowser2 interface"
+      → ここから先のログ出力なし (120秒後にSelenium側がタイムアウト)
+
+注意事項:
+  - force_create_process_api=True 使用時は、事前に TabProcGrowth=0 が必須
+  - ensure_clean_session=True 使用時は、rundll32.exe によるキャッシュクリアが実行される
+  - timeouts capability が null で Warning が出るが、動作には影響なし
+
+================================================================================
+4. 設定済みレジストリ
+================================================================================
+以下のレジストリ値が調査過程で設定された (元に戻す場合は削除):
+
+HKEY_CURRENT_USER\Software\Microsoft\Internet Explorer\Main
+  TabProcGrowth = "0" (REG_SZ)
+
+HKEY_LOCAL_MACHINE\Software\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BFCACHE
+  iexplore.exe = 0 (REG_DWORD)
+
+HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Internet Explorer\Main\FeatureControl\FEATURE_BFCACHE
+  iexplore.exe = 0 (REG_DWORD)
+
+================================================================================
+5. 採用した代替手段
+================================================================================
+方式: comtypes (IWebBrowser2 COM直接操作) + pywinauto
+
+理由:
+  - comtypes.client.CreateObject("InternetExplorer.Application") は正常動作確認済み
+  - IEFrame ウィンドウクラスが生成され、アクセシビリティツリーも正常
+  - IWebBrowser2 COM APIでDOM操作 (Navigate, Document等) が可能
+  - ダウンロードバー等のブラウザUI要素は pywinauto で操作
+  - Selenium/IEDriverへの依存を排除できる
+
+制約:
+  - Selenium の WebDriverWait / expected_conditions は使用不可
+  - 要素待機は ReadyState ポーリング + time.sleep で代替
+  - DOM操作は ie.Document 経由の MSHTML DOM API を使用
+  - JavaScript confirm ダイアログは pywinauto で操作
+
+================================================================================
+6. 参考: 調査用スクリプト一覧
+================================================================================
+automation/diag.py           - 環境診断 (IEDriver/Edge/IE設定の総合チェック)
+automation/fix_registry.py   - FEATURE_BFCACHE レジストリ修正 (管理者権限必要)
+automation/check_ie_infra.py - IE COMインフラ存在確認
+automation/inspect_iemode.py - Edge IEモードウィンドウ構造調査
+automation/minimal_test.py   - IEDriver最小構成テスト
+
+================================================================================
