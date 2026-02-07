@@ -210,21 +210,29 @@ def _handle_confirm_dialog_pywinauto():
     if texts:
         print(f"  [DEBUG] confirmダイアログ内テキスト: {texts}")
     dialog.set_focus()
-    clicked = False
-    for btn_title in ["OK", "はい(&Y)", "はい(Y)", "はい", "Yes"]:
-        try:
-            dialog.child_window(title=btn_title, control_type="Button").click_input()
-            print(f"  [DEBUG] confirmダイアログで「{btn_title}」を選択")
-            clicked = True
+    try:
+        buttons = [b for b in dialog.descendants()
+                   if b.friendly_class_name() == "Button" and b.window_text()]
+        btn_texts = [b.window_text() for b in buttons]
+    except Exception:
+        buttons = []
+        btn_texts = []
+    if btn_texts:
+        print(f"  [DEBUG] confirmダイアログのボタン一覧: {btn_texts}")
+
+    target = "OK"
+    target_btn = None
+    for b in buttons:
+        if b.window_text() == target:
+            target_btn = b
             break
-        except Exception:
-            pass
-    if not clicked:
-        try:
-            dialog["OK"].click()
-            print("  [DEBUG] confirmダイアログで「OK」を選択 (fallback)")
-        except Exception:
-            pass
+    if target_btn is None:
+        raise RuntimeError(f"confirmダイアログのOKボタンが見つかりません: {btn_texts}")
+    try:
+        target_btn.click()
+    except Exception:
+        target_btn.click_input()
+    print("  [DEBUG] confirmダイアログで「OK」を選択")
     try:
         dialog.wait_not("visible", timeout=10)
     except Exception:
@@ -362,83 +370,23 @@ def step_handle_save_dialog():
     os.makedirs(SAVE_PATH, exist_ok=True)
     print(f"  [DEBUG] 保存先: {save_file_path}")
 
-    file_name_set = False
     try:
         fn_host = save_dialog.child_window(auto_id="FileNameControlHost")
         fn_edit = fn_host.child_window(control_type="Edit")
         fn_edit.set_edit_text(save_file_path)
-        file_name_set = True
         print("  [DEBUG] ファイル名設定: FileNameControlHost経由")
     except Exception as e1:
-        print(f"  [DEBUG] FileNameControlHost失敗: {e1}")
-
-    if not file_name_set:
-        try:
-            fn_edit = save_dialog.child_window(title_re=".*ファイル名.*",
-                                                control_type="Edit")
-            fn_edit.set_edit_text(save_file_path)
-            file_name_set = True
-            print("  [DEBUG] ファイル名設定: title_re経由")
-        except Exception as e2:
-            print(f"  [DEBUG] title_re(Edit)失敗: {e2}")
-
-    if not file_name_set:
-        try:
-            save_dialog.set_focus()
-            time.sleep(0.5)
-            kbd.send_keys("%n")
-            time.sleep(0.5)
-            kbd.send_keys("^a")
-            kbd.send_keys(save_file_path, with_spaces=True)
-            file_name_set = True
-            print("  [DEBUG] ファイル名設定: キーボード(Alt+N)経由")
-        except Exception as e3:
-            print(f"  [DEBUG] キーボード入力失敗: {e3}")
-
-    if not file_name_set:
-        raise RuntimeError("ファイル名フィールドへの入力に失敗しました")
+        raise RuntimeError(f"ファイル名フィールドへの入力に失敗しました: {e1}")
 
     time.sleep(0.5)
 
-    save_clicked = False
     try:
         save_btn = save_dialog.child_window(auto_id="1", control_type="Button")
+        download_start = time.time()
         save_btn.click_input()
-        save_clicked = True
         print("  [DEBUG] 保存ボタン押下: auto_id=1経由")
     except Exception as e1:
-        print(f"  [DEBUG] auto_id=1失敗: {e1}")
-
-    if not save_clicked:
-        try:
-            save_btn = save_dialog.child_window(title_re=".*保存.*",
-                                                 control_type="Button")
-            save_btn.click_input()
-            save_clicked = True
-            print("  [DEBUG] 保存ボタン押下: title_re経由")
-        except Exception as e2:
-            print(f"  [DEBUG] title_re(Button)失敗: {e2}")
-
-    if not save_clicked:
-        try:
-            save_dialog.set_focus()
-            time.sleep(0.3)
-            kbd.send_keys("%s")
-            save_clicked = True
-            print("  [DEBUG] 保存ボタン押下: Alt+S経由")
-        except Exception as e3:
-            print(f"  [DEBUG] Alt+Sキー送信失敗: {e3}")
-
-    if not save_clicked:
-        try:
-            kbd.send_keys("{ENTER}")
-            save_clicked = True
-            print("  [DEBUG] 保存ボタン押下: Enterキー経由")
-        except Exception as e4:
-            print(f"  [DEBUG] Enterキー送信失敗: {e4}")
-
-    if not save_clicked:
-        raise RuntimeError("保存ボタンの押下に失敗しました")
+        raise RuntimeError(f"保存ボタンの押下に失敗しました: {e1}")
 
     # 上書き確認ダイアログの検出と確実なクリック
     try:
@@ -503,6 +451,8 @@ def step_handle_save_dialog():
                 except Exception:
                     target_btn.click_input()
                 print(f"  [DEBUG] 上書き確認ダイアログで「{target}」を選択")
+                # 上書き確認の押下後をダウンロード開始時刻とみなす
+                download_start = time.time()
             elif len(matched) == 0:
                 raise RuntimeError("上書き確認ダイアログのボタンが見つかりません: はい(&Y) / はい(Y)")
             else:
@@ -521,8 +471,70 @@ def step_handle_save_dialog():
         pass
     time.sleep(1)
 
+    if download_start is None:
+        download_start = time.time()
     print("[OK] 「名前を付けて保存」ダイアログで保存を実行")
-    return save_file_path, before_mtime
+    return save_file_path, before_mtime, download_start
+
+
+def wait_for_download_complete(save_file_path, start_time, timeout=60, stable_sec=3):
+    """partialファイル消滅と本体の更新を待つ（開始時刻以降のもののみ対象）"""
+    partial_path = f"{save_file_path}.partial"
+    end = time.time() + timeout
+    try:
+        start_time_local = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(start_time))
+    except Exception:
+        start_time_local = str(start_time)
+    print(
+        f"  [DEBUG] ダウンロード監視: file={save_file_path}, partial={partial_path}, "
+        f"start_time={start_time_local}"
+    )
+    last_size = None
+    last_mtime = None
+    stable_since = None
+    while time.time() < end:
+        partial_exists = os.path.exists(partial_path)
+        file_exists = os.path.exists(save_file_path)
+        partial_is_new = False
+        partial_mtime = None
+        if partial_exists:
+            try:
+                partial_mtime = os.path.getmtime(partial_path)
+                partial_is_new = partial_mtime >= start_time
+            except Exception:
+                partial_is_new = True
+        file_is_new = False
+        file_mtime = None
+        file_size = None
+        if file_exists:
+            try:
+                file_mtime = os.path.getmtime(save_file_path)
+                file_size = os.path.getsize(save_file_path)
+                file_is_new = file_mtime >= start_time
+            except Exception:
+                file_is_new = True
+
+        if file_exists and file_is_new and not partial_is_new:
+            return True
+
+        # .partial が残っていても、本体が更新されて安定していれば完了とみなす
+        if file_exists:
+            if file_size == last_size and file_mtime == last_mtime:
+                if stable_since is None:
+                    stable_since = time.time()
+                elif time.time() - stable_since >= stable_sec:
+                    return True
+            else:
+                stable_since = None
+            last_size = file_size
+            last_mtime = file_mtime
+
+        time.sleep(0.5)
+    raise TimeoutError(
+        f"ダウンロード完了待ちがタイムアウト: {save_file_path} / {partial_path} "
+        f"(file_mtime={file_mtime}, file_size={file_size}, "
+        f"partial_mtime={partial_mtime})"
+    )
 
 
 def main():
@@ -537,7 +549,10 @@ def main():
         step_login(driver)
         step_click_download_and_confirm(driver)
         step_handle_download_bar()
-        save_file_path, before_mtime = step_handle_save_dialog()
+        save_file_path, before_mtime, download_start = step_handle_save_dialog()
+
+        # ダウンロード完了待ち (.partial が消えるまで)
+        wait_for_download_complete(save_file_path, download_start, timeout=90)
 
         if os.path.exists(save_file_path):
             file_size = os.path.getsize(save_file_path)
