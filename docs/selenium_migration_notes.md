@@ -164,3 +164,27 @@ COM版と同じく、以下がすべて動作すること:
 5. ダウンロード通知バーで「名前を付けて保存」選択
 6. 保存ダイアログでファイルパス指定 → 保存
 7. 指定パスに CSV ファイルが存在する
+
+---
+
+## 調査スクリプトの記録（削除済み）
+
+複数の IE モードウィンドウやダイアログ判定のため、以下の PowerShell スクリプトで調査を実施した。
+スクリプト本体はリポジトリから削除し、調査内容のみをここに記録する。
+
+- `Save-ProcessList.ps1`
+  - 目的: 実行中プロセスの一覧を出力
+  - 出力例: `log/process_list.txt`
+- `Save-WindowList.ps1`
+  - 目的: 画面上のウィンドウタイトル一覧を出力（IEモード検出用）
+  - 出力例: `log/window_list.txt`
+- `Check-IEModeProcesses.ps1`
+  - 目的: `msedge.exe` の `CommandLine` を取得し、`--ie-mode-force` など IE モード起動引数を確認
+  - 出力例: `log/iemode_processes.txt`
+- `Save-DialogClassInfo.ps1`
+  - 目的: 「名前を付けて保存」/「上書き確認」ダイアログの Class 名と Title を列挙
+  - 出力例: `log/dialog_class_info.txt`
+
+調査結果（要点）:
+- 保存ダイアログ: `ClassName=#32770`, `Title=名前を付けて保存`
+- 上書き確認ダイアログ: `ClassName=#32770`, `Title=名前を付けて保存の確認`

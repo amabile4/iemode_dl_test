@@ -13,3 +13,4 @@ wheels/
 .claude
 bin/
 download/
+log/

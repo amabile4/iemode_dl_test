@@ -6,4 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "comtypes>=1.4.15",
+    "flask>=3.1.2",
+    "pywinauto>=0.6.9",
+    "selenium>=4.40.0",
 ]
